@@ -230,11 +230,14 @@ def push_via_api(files, message, parent):
     国内网络下 git smart-HTTP 传输经常挂死（实测 push 超时 300s），
     而 gh api 走不同的 HTTPS 路径正常。这里构建 blob→tree→commit→ref。
 
+    关键：不使用 base_tree，而是提交完整文件列表构成的全新 tree。
+    base_tree 是增量合并语义，删除/重命名的文件会留在远程（实测踩过：
+    docs 文件从 date.md 改名 date-1.md 后旧文件残留）。全量 tree 保证
+    远程精确镜像本地文件集。
+
     files: [(repo内相对路径, bytes)]
     返回新 commit SHA。
     """
-    base_tree = gh_api([f"repos/{GH_REPO}/git/commits/{parent}", "--jq", ".tree.sha"])
-
     tree = []
     for path, data in files:
         sha = gh_api(
@@ -243,9 +246,7 @@ def push_via_api(files, message, parent):
         )
         tree.append({"path": path, "mode": "100644", "type": "blob", "sha": sha})
 
-    tree_sha = gh_api(
-        [f"repos/{GH_REPO}/git/trees", "--jq", ".sha"], {"base_tree": base_tree, "tree": tree}
-    )
+    tree_sha = gh_api([f"repos/{GH_REPO}/git/trees", "--jq", ".sha"], {"tree": tree})
     commit_sha = gh_api(
         [f"repos/{GH_REPO}/git/commits", "--jq", ".sha"],
         {"message": message, "tree": tree_sha, "parents": [parent]},
@@ -334,14 +335,22 @@ def main():
     if remote_after != new_sha:
         sys.exit(f"推送未生效！期望 {new_sha[:8]}，远程为 {remote_after[:8]}")
 
-    # 本地对齐远程 commit，保证下次运行的 parent 正确
-    run(["git", "fetch", "-q", "origin", "main"], check=False, timeout=120)
-    run(["git", "reset", "-q", "--hard", new_sha], check=False)
+    # 本地对齐远程 commit，保证下次运行的 parent 正确。
+    # 注意：new_sha 是 API 在服务端创建的，本地对象库里没有，
+    # 必须先 fetch 拿到对象再 reset，否则 reset 静默失败导致本地/远程长期分叉。
+    fetched = subprocess.run(
+        ["git", "fetch", "origin", "main"], cwd=REPO, capture_output=True, text=True, timeout=120
+    )
+    if fetched.returncode == 0:
+        run(["git", "reset", "-q", "--hard", "FETCH_HEAD"], check=False)
+    local_now = run(["git", "rev-parse", "HEAD"], check=False)
+    aligned = local_now == new_sha
 
     lines = "\n".join(f"· {p['date']} 〔{p['platform']}〕{p['title']}" for p in new)
+    warn = "" if aligned else f"\n\n⚠️ 本地 ref 未对齐远程（本地 {local_now[:8]} / 远程 {new_sha[:8]}），推送本身已成功。"
     print(
         f"📚 已归档 {len(new)} 条到 daily-tech-digest（共 {len(allitems)} 篇）\n\n"
-        f"{lines}\n\nhttps://github.com/{GH_REPO}"
+        f"{lines}\n\nhttps://github.com/{GH_REPO}{warn}"
     )
 
 
