@@ -6,9 +6,12 @@
 
 ## 索引
 
+共 4 篇。
+
 | 日期 | 标题 | 平台 |
 |---|---|---|
-| 2026-08-05 | [Agent成本暴降几十倍，LlamaFactory作者开源新工具：0.2元自动造Agent](docs/2026-08-05.md) | 36Kr |
+| 2026-08-05 | [【归档流程自检】测试条目，稍后自动删除](docs/2026-08-05-2.md) | SelfTest |
+| 2026-08-05 | [Agent成本暴降几十倍，LlamaFactory作者开源新工具：0.2元自动造Agent](docs/2026-08-05-1.md) | 36Kr |
 | 2026-08-04 | [DeepSeek V4-Flash 正式版深度解读：一行 changelog 里藏着 2840 亿参数和暴涨 47 分的野心](docs/2026-08-04-2.md) | 掘金 |
 | 2026-08-04 | [2840亿参数只卖白菜价：DeepSeek V4 Flash 正式版上线，Agent 能力暴涨6倍](docs/2026-08-04-1.md) | 掘金 |
 
@@ -41,12 +44,15 @@
 - **为什么值得看** —— 入选理由，说明这条的实际价值而非泛泛而谈
 - **数据来源** —— 当日候选池规模与各平台条数明细
 
-## 技术栈
+## 自动化
 
 | 环节 | 实现 |
 |---|---|
 | 热榜采集 | [website-hot-hub](https://github.com/cxyfreedom/website-hot-hub) |
-| 筛选与归档 | [Hermes Agent](https://hermes-agent.nousresearch.com)（定时任务，每日 13:00） |
+| 每日筛选 | [Hermes Agent](https://hermes-agent.nousresearch.com) 定时任务，13:00 |
+| 自动归档 | 定时任务 13:30 解析当日结果，提交并推送本仓库 |
+
+全流程无人工介入。归档脚本见 [`archive.py`](archive.py)。
 
 ## 致谢
 

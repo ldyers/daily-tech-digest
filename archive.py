@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""每日热榜精选 → GitHub 归档。
+
+从 cron job 5d587752a3af 的输出目录解析精选条目，归档到
+/opt/daily-tech-digest 并推送到 GitHub。
+
+设计要点：
+- 幂等：按 URL 去重，已归档的不重复添加；无新增则静默退出（不打扰用户）
+- index.json 是权威累积存储 —— 即使 cron 输出被清理，历史仍在
+- 全量重写 docs/*.md，保证同日多条时命名规则一致（date.md / date-N.md）
+- 推送走 Git Data API：国内网络下 git smart-HTTP 传输实测会挂死超时
+
+退出码：0 = 正常（有新增或无新增），非 0 = 出错（会触发 cron 告警）
+"""
+import base64
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+REPO = pathlib.Path("/opt/daily-tech-digest")
+DOCS = REPO / "docs"
+INDEX = DOCS / "index.json"
+CRON_OUT = pathlib.Path.home() / ".hermes/cron/output/5d587752a3af"
+GH_REPO = "ldyers/daily-tech-digest"
+HOT_HUB = "https://github.com/cxyfreedom/website-hot-hub"
+
+
+def run(cmd, cwd=REPO, check=True, timeout=180):
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"命令失败 {' '.join(cmd)}\nstdout: {r.stdout}\nstderr: {r.stderr}")
+    return r.stdout.strip()
+
+
+def parse_run(path):
+    """从单份 cron 输出解析精选条目。返回 dict 或 None（格式不符/运行失败）。"""
+    txt = path.read_text(encoding="utf-8", errors="replace")
+    if "## Response" not in txt:
+        return None
+    resp = txt.split("## Response", 1)[-1].strip()
+    if "[SILENT]" in resp:
+        return None
+
+    url = re.search(r"链接：(\S+)", resp)
+    title = re.search(r"^\*\*(.+?)\*\*\s*$", resp, re.M)
+    if not (url and title):
+        return None
+
+    date = re.search(r"每日热榜精选\**\s*\((\d{4}-\d{2}-\d{2})\)", resp)
+    plat = re.search(r"平台：(.+)", resp)
+    reason = re.search(r"推荐理由：(.+?)(?:\n\n|\n---|\Z)", resp, re.S)
+    source = re.search(r"数据来源：(.+)", resp)
+    run_time = re.search(r"\*\*Run Time:\*\*\s*(.+)", txt)
+
+    return {
+        "run_ts": path.stem,
+        "run_time": run_time.group(1).strip() if run_time else None,
+        "date": date.group(1) if date else path.stem[:10],
+        "title": title.group(1).strip(),
+        "platform": plat.group(1).strip() if plat else "未知",
+        "url": url.group(1).strip(),
+        "reason": reason.group(1).strip() if reason else "",
+        "source": source.group(1).strip() if source else "",
+    }
+
+
+def write_doc(path, p):
+    path.write_text(
+        f"""# {p['title']}
+
+> 每日热榜精选 · {p['date']}
+
+| 项目 | 内容 |
+|---|---|
+| 日期 | {p['date']} |
+| 来源平台 | {p['platform']} |
+| 原文链接 | [{p['url']}]({p['url']}) |
+| 采集时间 | {p['run_time']} |
+
+## 为什么值得看
+
+{p['reason']}
+
+## 数据来源
+
+本条从当日多平台热榜中筛选得出。
+
+- 候选池：{p['source']}
+- 筛选逻辑：技术/AI/编程类优先 → 商业科技重大事件次之 → 要求有深度信息量，排除纯娱乐内容
+
+---
+
+<sub>由 [website-hot-hub]({HOT_HUB}) 采集，经 Hermes Agent 自动筛选归档。</sub>
+""",
+        encoding="utf-8",
+    )
+
+
+def write_readme(items):
+    """items 已按日期降序。"""
+    rows = "\n".join(
+        f"| {p['date']} | [{p['title']}](docs/{p['file']}) | {p['platform']} |" for p in items
+    )
+    (REPO / "README.md").write_text(
+        f"""# 每日技术热点归档 · Daily Tech Digest
+
+每天从 8 个中文平台的热榜中筛选出**最有价值的 1 条**技术/科技资讯，自动归档留存。
+
+热榜每天刷过去就没了，真正有信号量的那几条值得留下来。这个仓库就是干这个的。
+
+## 索引
+
+共 {len(items)} 篇。
+
+| 日期 | 标题 | 平台 |
+|---|---|---|
+{rows}
+
+全部归档在 [`docs/`](docs/) 目录，另有结构化数据 [`docs/index.json`](docs/index.json) 便于程序读取。
+
+## 数据来源
+
+采集覆盖 8 个平台：
+
+**36Kr** · **B站** · **GitHub Trending** · **抖音** · **掘金** · **少数派** · **微信读书** · **快手**
+
+每日候选池约 300–700 条，从中选出 1 条。
+
+## 筛选标准
+
+按优先级排序：
+
+1. **技术 / AI / 编程**相关热点优先 —— AI 突破、新开源项目、语言与框架动态、开发者工具
+2. **商业 / 科技产业**重大事件次之 —— 大厂战略、融资、行业变革
+3. 要求**有深度信息量**，排除纯娱乐、八卦、短视频梗
+4. 同等价值时优先技术类平台（36Kr / GitHub / 掘金）
+5. 仍然并列则取排名靠前者
+
+## 归档格式
+
+每篇文档包含：
+
+- **标题** —— 原始热榜标题
+- **元信息表** —— 日期、来源平台、原文链接、采集时间
+- **为什么值得看** —— 入选理由，说明这条的实际价值而非泛泛而谈
+- **数据来源** —— 当日候选池规模与各平台条数明细
+
+## 自动化
+
+| 环节 | 实现 |
+|---|---|
+| 热榜采集 | [website-hot-hub]({HOT_HUB}) |
+| 每日筛选 | [Hermes Agent](https://hermes-agent.nousresearch.com) 定时任务，13:00 |
+| 自动归档 | 定时任务 13:30 解析当日结果，提交并推送本仓库 |
+
+全流程无人工介入。归档脚本见 [`archive.py`](archive.py)。
+
+## 致谢
+
+热榜采集基于 [cxyfreedom/website-hot-hub]({HOT_HUB})，感谢原作者。
+
+## License
+
+MIT —— 归档内容的版权归各原文作者与平台所有，本仓库仅作摘要索引与个人留存之用。
+""",
+        encoding="utf-8",
+    )
+
+
+def write_docs_readme(items):
+    rows = "\n".join(
+        f"| [{p['file']}]({p['file']}) | {p['date']} | {p['title']} |" for p in items
+    )
+    (DOCS / "README.md").write_text(
+        f"""# 归档目录
+
+按日期命名，一天一条。同一天有多条时以 `-1` / `-2` 后缀区分。
+
+共 {len(items)} 篇。
+
+| 文件 | 日期 | 标题 |
+|---|---|---|
+{rows}
+
+## index.json
+
+同目录下的 `index.json` 是结构化版本，字段如下：
+
+| 字段 | 说明 |
+|---|---|
+| `date` | 归档日期 |
+| `title` | 热榜原标题 |
+| `platform` | 来源平台 |
+| `url` | 原文链接 |
+| `reason` | 入选理由 |
+| `source` | 当日候选池明细 |
+| `run_time` | 采集时间 |
+| `run_ts` | 采集任务运行标识 |
+""",
+        encoding="utf-8",
+    )
+
+
+def gh_api(args, payload=None, timeout=90):
+    """调用 gh api。payload 写入临时文件再 --input，避免 shell 引号地狱。"""
+    cmd = ["gh", "api"] + args
+    tmp = None
+    if payload is not None:
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+        json.dump(payload, tmp, ensure_ascii=False)
+        tmp.close()
+        cmd += ["--input", tmp.name]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            raise RuntimeError(f"gh api 失败 {args}\n{r.stderr}")
+        return r.stdout.strip()
+    finally:
+        if tmp:
+            os.unlink(tmp.name)
+
+
+def push_via_api(files, message, parent):
+    """通过 GitHub Git Data API 推送。
+
+    国内网络下 git smart-HTTP 传输经常挂死（实测 push 超时 300s），
+    而 gh api 走不同的 HTTPS 路径正常。这里构建 blob→tree→commit→ref。
+
+    files: [(repo内相对路径, bytes)]
+    返回新 commit SHA。
+    """
+    base_tree = gh_api([f"repos/{GH_REPO}/git/commits/{parent}", "--jq", ".tree.sha"])
+
+    tree = []
+    for path, data in files:
+        sha = gh_api(
+            [f"repos/{GH_REPO}/git/blobs", "--jq", ".sha"],
+            {"content": base64.b64encode(data).decode(), "encoding": "base64"},
+        )
+        tree.append({"path": path, "mode": "100644", "type": "blob", "sha": sha})
+
+    tree_sha = gh_api(
+        [f"repos/{GH_REPO}/git/trees", "--jq", ".sha"], {"base_tree": base_tree, "tree": tree}
+    )
+    commit_sha = gh_api(
+        [f"repos/{GH_REPO}/git/commits", "--jq", ".sha"],
+        {"message": message, "tree": tree_sha, "parents": [parent]},
+    )
+    gh_api(
+        ["-X", "PATCH", f"repos/{GH_REPO}/git/refs/heads/main", "--jq", ".object.sha"],
+        {"sha": commit_sha},
+    )
+    return commit_sha
+
+
+def main():
+    if not REPO.is_dir():
+        sys.exit(f"仓库目录不存在: {REPO}")
+
+    # 已归档条目（权威累积存储）
+    archived = json.loads(INDEX.read_text(encoding="utf-8")) if INDEX.exists() else []
+    known = {p["url"] for p in archived}
+
+    if not CRON_OUT.is_dir():
+        return  # 输出目录还不存在，静默
+
+    found = []
+    for f in sorted(CRON_OUT.glob("*.md")):
+        p = parse_run(f)
+        if p:
+            found.append(p)
+
+    new = []
+    seen = set(known)
+    for p in found:
+        if p["url"] not in seen:
+            new.append(p)
+            seen.add(p["url"])
+
+    if not new:
+        return  # 无新增 —— 静默退出，不打扰用户
+
+    # 合并 + 全量重写
+    allitems = archived + new
+    allitems.sort(key=lambda x: (x["date"], x["run_ts"]))
+
+    bydate = {}
+    for p in allitems:
+        bydate.setdefault(p["date"], []).append(p)
+
+    for old in DOCS.glob("*.md"):
+        if old.name != "README.md":
+            old.unlink()
+
+    for date, items in bydate.items():
+        for i, p in enumerate(items, 1):
+            p["file"] = f"{date}.md" if len(items) == 1 else f"{date}-{i}.md"
+            write_doc(DOCS / p["file"], p)
+
+    desc = sorted(allitems, key=lambda x: (x["date"], x.get("file", "")), reverse=True)
+    write_readme(desc)
+    write_docs_readme(desc)
+    INDEX.write_text(json.dumps(allitems, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 本地提交（保留可读历史）
+    run(["git", "add", "-A"])
+    if not run(["git", "status", "--porcelain"]):
+        return  # 内容无实质变化
+
+    titles = "\n".join(f"- {p['date']} {p['title']}" for p in new)
+    msg = f"docs: 归档 {len(new)} 条热榜精选\n\n{titles}"
+    run(["git", "commit", "-q", "-m", msg])
+
+    # 推送：以远程当前 main 为 parent（避免本地领先时构错父提交）
+    remote_before = gh_api([f"repos/{GH_REPO}/git/refs/heads/main", "--jq", ".object.sha"])
+
+    payload = []
+    for rel in run(["git", "ls-files"]).splitlines():
+        fp = REPO / rel
+        if fp.is_file():
+            payload.append((rel, fp.read_bytes()))
+
+    try:
+        new_sha = push_via_api(payload, msg, remote_before)
+    except Exception as e:
+        sys.exit(f"归档已本地提交但推送失败: {e}\n手动处理: cd {REPO} && git push origin main")
+
+    # 独立验证：回读远程 ref，确认真的落地
+    remote_after = gh_api([f"repos/{GH_REPO}/git/refs/heads/main", "--jq", ".object.sha"])
+    if remote_after != new_sha:
+        sys.exit(f"推送未生效！期望 {new_sha[:8]}，远程为 {remote_after[:8]}")
+
+    # 本地对齐远程 commit，保证下次运行的 parent 正确
+    run(["git", "fetch", "-q", "origin", "main"], check=False, timeout=120)
+    run(["git", "reset", "-q", "--hard", new_sha], check=False)
+
+    lines = "\n".join(f"· {p['date']} 〔{p['platform']}〕{p['title']}" for p in new)
+    print(
+        f"📚 已归档 {len(new)} 条到 daily-tech-digest（共 {len(allitems)} 篇）\n\n"
+        f"{lines}\n\nhttps://github.com/{GH_REPO}"
+    )
+
+
+if __name__ == "__main__":
+    main()
