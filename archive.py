@@ -36,8 +36,27 @@ def run(cmd, cwd=REPO, check=True, timeout=180):
     return r.stdout.strip()
 
 
+# 脚本模式（no_agent: true）输出没有"推荐理由/数据来源"文案，
+# 用固定的事实性说明代替，不得杜撰推荐语。
+SCRIPT_NOTE = (
+    "由每日筛选脚本自动选出（非人工编辑）：按当日多平台热榜采集顺序取第 1 条，"
+    "本条为 {p} 当日榜单首位。"
+)
+SCRIPT_SOURCE = (
+    "本条由筛选脚本从当日多平台热榜采集数据中自动选出"
+    "（8 平台：36Kr / B站 / GitHub / 抖音 / 掘金 / 少数派 / 微信读书 / 快手）。"
+)
+
+
 def parse_run(path):
-    """从单份 cron 输出解析精选条目。返回 dict 或 None（格式不符/运行失败）。"""
+    """从单份 cron 输出解析精选条目。返回 dict 或 None（格式不符/运行失败）。
+
+    兼容两种输出：
+    - agent 模式：中文模板（**标题** / 链接： / 平台： / 推荐理由： / 数据来源：）
+    - 脚本模式：LLM 转述脚本 JSON 结果，实测两种形态——
+      a) 内嵌 ```json 或单行 {"platform","title","url"} 块（08-24/25/27）
+      b) markdown 行：> ### 标题 / 🔗 URL / **来源**：平台（08-29）
+    """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
         return None
@@ -45,27 +64,95 @@ def parse_run(path):
     if "[SILENT]" in resp:
         return None
 
-    url = re.search(r"链接：(\S+)", resp)
-    title = re.search(r"^\*\*(.+?)\*\*\s*$", resp, re.M)
-    if not (url and title):
-        return None
-
-    date = re.search(r"每日热榜精选\**\s*\((\d{4}-\d{2}-\d{2})\)", resp)
-    plat = re.search(r"平台：(.+)", resp)
-    reason = re.search(r"推荐理由：(.+?)(?:\n\n|\n---|\Z)", resp, re.S)
-    source = re.search(r"数据来源：(.+)", resp)
     run_time = re.search(r"\*\*Run Time:\*\*\s*(.+)", txt)
-
-    return {
+    date_m = re.search(r"每日热榜精选\**\s*\((\d{4}-\d{2}-\d{2})\)", resp) or re.search(
+        r"(\d{4}-\d{2}-\d{2})", resp
+    )
+    base = {
         "run_ts": path.stem,
         "run_time": run_time.group(1).strip() if run_time else None,
-        "date": date.group(1) if date else path.stem[:10],
-        "title": title.group(1).strip(),
-        "platform": plat.group(1).strip() if plat else "未知",
-        "url": url.group(1).strip(),
-        "reason": reason.group(1).strip() if reason else "",
-        "source": source.group(1).strip() if source else "",
+        "date": date_m.group(1) if date_m else path.stem[:10],
     }
+
+    # 旧格式优先（信息最全：含推荐理由与候选池明细）
+    url = re.search(r"链接：(\S+)", resp)
+    title = re.search(r"^\*\*(.+?)\*\*\s*$", resp, re.M)
+    if url and title:
+        plat = re.search(r"平台：(.+)", resp)
+        reason = re.search(r"推荐理由：(.+?)(?:\n\n|\n---|\Z)", resp, re.S)
+        source = re.search(r"数据来源：(.+)", resp)
+        return {
+            **base,
+            "title": title.group(1).strip(),
+            "platform": plat.group(1).strip() if plat else "未知",
+            "url": url.group(1).strip(),
+            "reason": reason.group(1).strip() if reason else "",
+            "source": source.group(1).strip() if source else "",
+        }
+
+    # 脚本模式 a)：JSON 块（fenced 或单行），要求 title 非空且 url 为 http(s)
+    def _valid(d):
+        return (
+            isinstance(d, dict)
+            and "error" not in d
+            and isinstance(d.get("url"), str)
+            and d["url"].strip().startswith("http")
+            and isinstance(d.get("title"), str)
+            and bool(d["title"].strip())
+        )
+
+    cands = []
+    for block in re.findall(r"```(?:json)?\s*\n(.*?)```", resp, re.S):
+        s = block.strip()
+        if s.startswith("{"):
+            try:
+                cands.append(json.loads(s))
+            except json.JSONDecodeError:
+                pass
+    for line in resp.splitlines():
+        s = line.strip()
+        if s.startswith("{") and s.endswith("}") and '"url"' in s:
+            try:
+                cands.append(json.loads(s))
+            except json.JSONDecodeError:
+                pass
+    for d in reversed(cands):  # 取最后一个有效候选：最终结果通常在文末
+        if _valid(d):
+            plat = (d.get("platform") or "").strip() or "未知"
+            plat = re.sub(r"\s*热榜$", "", plat)
+            return {
+                **base,
+                "title": d["title"].strip(),
+                "platform": plat,
+                "url": d["url"].strip(),
+                "reason": SCRIPT_NOTE.format(p=plat),
+                "source": SCRIPT_SOURCE,
+            }
+
+    # 脚本模式 b)：markdown 行（> ### 标题 / 🔗 URL / **来源**：平台）
+    murl = re.search(r"🔗\s*<?(\S+?)>?(?:\s|$)", resp)
+    mtitle = re.search(r"^>\s*#{1,6}\s+(.+?)\s*$", resp, re.M)
+    if murl and mtitle:
+        u = murl.group(1)
+        md = re.match(r"\[.*?\]\((\S+?)\)", u)
+        if md:
+            u = md.group(1)
+        if not u.startswith("http"):
+            return None
+        plat = "未知"
+        pm = re.search(r"\*\*来源\*\*[：:]\s*(.+)", resp)
+        if pm:
+            plat = re.sub(r"\s*热榜$", "", pm.group(1).strip()) or "未知"
+        return {
+            **base,
+            "title": mtitle.group(1).strip(),
+            "platform": plat,
+            "url": u,
+            "reason": SCRIPT_NOTE.format(p=plat),
+            "source": SCRIPT_SOURCE,
+        }
+
+    return None
 
 
 def write_doc(path, p):
