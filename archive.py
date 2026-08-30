@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO = pathlib.Path("/opt/daily-tech-digest")
 DOCS = REPO / "docs"
@@ -322,8 +323,25 @@ def gh_api(args, payload=None, timeout=90):
             os.unlink(tmp.name)
 
 
-def push_via_api(files, message, parent):
+def gh_identity(now):
+    """提交者身份：优先 GitHub token 用户（本地与远程两侧用同一身份）。"""
+    try:
+        u = json.loads(gh_api(["user", "--jq", "{login: .login, id: .id}"]))
+        name = u.get("login") or "archive-bot"
+        email = f"{u.get('id', 0)}+{name}@users.noreply.github.com"
+    except Exception:
+        name = run(["git", "config", "user.name"], check=False) or "archive-bot"
+        email = run(["git", "config", "user.email"], check=False) or "archive-bot@local"
+    iso = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"name": name, "email": email, "date": iso}
+
+
+def push_via_api(files, message, parent, identity=None):
     """通过 GitHub Git Data API 推送。
+
+    message 会规范化为恰好一个尾部换行 —— 与本地 `git commit -m` 的
+    规范化一致（实测 GitHub 原样存储传入字节，多一个少一个换行 SHA 都会不同）。
+    
 
     国内网络下 git smart-HTTP 传输经常挂死（实测 push 超时 300s），
     而 gh api 走不同的 HTTPS 路径正常。这里构建 blob→tree→commit→ref。
@@ -345,9 +363,16 @@ def push_via_api(files, message, parent):
         tree.append({"path": path, "mode": "100644", "type": "blob", "sha": sha})
 
     tree_sha = gh_api([f"repos/{GH_REPO}/git/trees", "--jq", ".sha"], {"tree": tree})
+    message = message.rstrip("\n") + "\n"
+    commit_payload = {"message": message, "tree": tree_sha, "parents": [parent]}
+    if identity:
+        # 显式传 author/committer（实测 GitHub 原样存储，含 +0000 偏移），
+        # 使服务端对象与本地确定性提交逐字节一致 → 同 SHA。
+        commit_payload["author"] = identity
+        commit_payload["committer"] = identity
     commit_sha = gh_api(
         [f"repos/{GH_REPO}/git/commits", "--jq", ".sha"],
-        {"message": message, "tree": tree_sha, "parents": [parent]},
+        commit_payload,
     )
     gh_api(
         ["-X", "PATCH", f"repos/{GH_REPO}/git/refs/heads/main", "--jq", ".object.sha"],
@@ -458,10 +483,33 @@ def main():
 
     titles = "\n".join(f"- {p['date']} {p['title']}" for p in new)
     msg = f"docs: 归档 {len(new)} 条热榜精选\n\n{titles}"
-    run(["git", "commit", "-q", "-m", msg])
 
     # 推送：以远程当前 main 为 parent（避免本地领先时构错父提交）
     remote_before = gh_api([f"repos/{GH_REPO}/git/refs/heads/main", "--jq", ".object.sha"])
+
+    # 确定性提交要求本地 HEAD 与 remote_before 同父链，否则 SHA 必然不等。
+    # 本地领先/分叉时：先补齐远程对象（缺则经 API 重建），再软回退——
+    # 工作区/暂存区内容原样保留，未推送的本地提交折叠进本次提交。
+    if run(["git", "rev-parse", "HEAD"], check=False) != remote_before:
+        _e = subprocess.run(["git", "cat-file", "-e", remote_before],
+                            cwd=REPO, capture_output=True)
+        if _e.returncode != 0:
+            align_local_to_remote(remote_before)
+        run(["git", "reset", "-q", "--soft", remote_before], check=False)
+
+    # 确定性提交：本地与 API 两侧用同一身份/时间/时区（+0000）构造同一 commit 对象，
+    # 推送返回的 SHA 即本地 HEAD —— 对象本地天然已有，update-ref 即可对齐。
+    now = int(time.time())
+    ident = gh_identity(now)
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": ident["name"], "GIT_AUTHOR_EMAIL": ident["email"],
+           "GIT_AUTHOR_DATE": f"{now} +0000",
+           "GIT_COMMITTER_NAME": ident["name"], "GIT_COMMITTER_EMAIL": ident["email"],
+           "GIT_COMMITTER_DATE": f"{now} +0000"}
+    c = subprocess.run(["git", "commit", "-q", "-m", msg], cwd=REPO, env=env,
+                       capture_output=True, text=True)
+    if c.returncode != 0:
+        sys.exit(f"git commit 失败: {c.stderr}")
 
     payload = []
     for rel in run(["git", "ls-files"]).splitlines():
@@ -470,7 +518,7 @@ def main():
             payload.append((rel, fp.read_bytes()))
 
     try:
-        new_sha = push_via_api(payload, msg, remote_before)
+        new_sha = push_via_api(payload, msg, remote_before, identity=ident)
     except Exception as e:
         sys.exit(f"归档已本地提交但推送失败: {e}\n手动处理: cd {REPO} && git push origin main")
 
@@ -480,15 +528,20 @@ def main():
         sys.exit(f"推送未生效！期望 {new_sha[:8]}，远程为 {remote_after[:8]}")
 
     # 本地对齐远程 commit，保证下次运行的 parent 正确。
-    # 注意：new_sha 是 API 在服务端创建的，本地对象库里没有，
-    # 必须先 fetch 拿到对象再 reset，否则 reset 静默失败导致本地/远程长期分叉。
-    fetched = subprocess.run(
-        ["git", "fetch", "origin", "main"], cwd=REPO, capture_output=True, text=True, timeout=120
-    )
-    if fetched.returncode == 0:
-        run(["git", "reset", "-q", "--hard", "FETCH_HEAD"], check=False)
+    # 首选：确定性提交命中（本地 HEAD 即 new_sha），直接更新引用，无需网络。
+    # 回退：fetch（本环境实测必失败）→ API 重建对象（align_local_to_remote）。
+    local_now = run(["git", "rev-parse", "HEAD"], check=False)
+    if local_now == new_sha:
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", new_sha],
+                       cwd=REPO, check=False)
     else:
-        align_local_to_remote(new_sha)
+        fetched = subprocess.run(
+            ["git", "fetch", "origin", "main"], cwd=REPO, capture_output=True, text=True, timeout=120
+        )
+        if fetched.returncode == 0:
+            run(["git", "reset", "-q", "--hard", "FETCH_HEAD"], check=False)
+        else:
+            align_local_to_remote(new_sha)
     local_now = run(["git", "rev-parse", "HEAD"], check=False)
     aligned = local_now == new_sha
 
