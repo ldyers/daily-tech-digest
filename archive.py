@@ -374,10 +374,27 @@ def push_via_api(files, message, parent, identity=None):
         [f"repos/{GH_REPO}/git/commits", "--jq", ".sha"],
         commit_payload,
     )
-    gh_api(
-        ["-X", "PATCH", f"repos/{GH_REPO}/git/refs/heads/main", "--jq", ".object.sha"],
-        {"sha": commit_sha},
-    )
+    try:
+        gh_api(
+            ["-X", "PATCH", f"repos/{GH_REPO}/git/refs/heads/main", "--jq", ".object.sha"],
+            {"sha": commit_sha},
+        )
+    except RuntimeError as e:
+        # 非快进：仅当远程 tip 与本次提交内容一致（同 tree）时才允许强推——
+        # 此时被替换的只是内容重复的历史，不丢任何数据；否则报错终止。
+        if "fast forward" not in str(e):
+            raise
+        tip = json.loads(gh_api([f"repos/{GH_REPO}/git/refs/heads/main"]))
+        tip_c = json.loads(gh_api([f"repos/{GH_REPO}/git/commits/{tip['object']['sha']}"]))
+        if tip_c["tree"]["sha"] != tree_sha:
+            raise RuntimeError(
+                f"远程 tip 内容与本次提交不一致，拒绝强推："
+                f"tip tree {tip_c['tree']['sha']} != {tree_sha}"
+            )
+        gh_api(
+            ["-X", "PATCH", f"repos/{GH_REPO}/git/refs/heads/main", "--jq", ".object.sha"],
+            {"sha": commit_sha, "force": True},
+        )
     return commit_sha
 
 
