@@ -46,6 +46,7 @@ SCRIPT_SOURCE = (
     "本条由筛选脚本从当日多平台热榜采集数据中自动选出"
     "（8 平台：36Kr / B站 / GitHub / 抖音 / 掘金 / 少数派 / 微信读书 / 快手）。"
 )
+AGENT_SOURCE = "本条由 Hermes Agent 代理模式从当日多平台热榜采集数据中筛选。"
 
 
 def parse_run(path):
@@ -130,9 +131,11 @@ def parse_run(path):
             }
 
     # 脚本模式 b)：markdown 行（> ### 标题 / 🔗 URL / **来源**：平台）
+    # 代理模式回退变体（08-30 实测）：**[平台] 标题** / 🔗 URL / **推荐理由**：…
     murl = re.search(r"🔗\s*<?(\S+?)>?(?:\s|$)", resp)
     mtitle = re.search(r"^>\s*#{1,6}\s+(.+?)\s*$", resp, re.M)
-    if murl and mtitle:
+    atitle = re.search(r"^\*\*\[(.+?)\]\s*(.+?)\*\*\s*$", resp, re.M)
+    if murl and (mtitle or atitle):
         u = murl.group(1)
         md = re.match(r"\[.*?\]\((\S+?)\)", u)
         if md:
@@ -143,13 +146,19 @@ def parse_run(path):
         pm = re.search(r"\*\*来源\*\*[：:]\s*(.+)", resp)
         if pm:
             plat = re.sub(r"\s*热榜$", "", pm.group(1).strip()) or "未知"
+        reason = None
+        if atitle:
+            plat = re.sub(r"\s*热榜$", "", atitle.group(1).strip()) or plat
+            rm = re.search(r"\*\*推荐理由\*\*[：:]?\s*(.+?)(?:\n\n|\n---|\Z)", resp, re.S)
+            if rm:
+                reason = rm.group(1).strip()
         return {
             **base,
-            "title": mtitle.group(1).strip(),
+            "title": (atitle.group(2) if atitle else mtitle.group(1)).strip(),
             "platform": plat,
             "url": u,
-            "reason": SCRIPT_NOTE.format(p=plat),
-            "source": SCRIPT_SOURCE,
+            "reason": reason or SCRIPT_NOTE.format(p=plat),
+            "source": AGENT_SOURCE,
         }
 
     return None
