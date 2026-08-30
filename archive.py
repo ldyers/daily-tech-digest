@@ -13,6 +13,7 @@
 退出码：0 = 正常（有新增或无新增），非 0 = 出错（会触发 cron 告警）
 """
 import base64
+import datetime
 import json
 import os
 import pathlib
@@ -57,6 +58,7 @@ def parse_run(path):
     - 脚本模式：LLM 转述脚本 JSON 结果，实测两种形态——
       a) 内嵌 ```json 或单行 {"platform","title","url"} 块（08-24/25/27）
       b) markdown 行：> ### 标题 / 🔗 URL / **来源**：平台（08-29）
+      c) 代理模式回退：**[平台] 标题** / 🔗 URL / **推荐理由**：…（08-30）
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -354,6 +356,52 @@ def push_via_api(files, message, parent):
     return commit_sha
 
 
+def align_local_to_remote(remote_sha):
+    """fetch 失败时（本环境 git smart-HTTP 被断连）从 API 重建远程 commit 对象。
+
+    GitHub 存的 commit 对象与本地 git commit 产出的字节不完全一致：
+    消息不带尾部换行、时区偏移未知（API 只返回 Z 规范化时刻，实测存的是
+    本机时区 +0800）。穷举时区（步长 30 分钟）与消息尾部两种形态，命中即
+    写入对象并更新本地引用；全部未命中（如带 gpgsig 等额外头）则放弃对齐，
+    保持本地平行历史——不影响后续推送（parent 每次取自远程 ref）。
+    """
+    try:
+        c = json.loads(gh_api([f"repos/{GH_REPO}/git/commits/{remote_sha}"]))
+    except Exception:
+        return False
+    tree = c["tree"]["sha"]
+    parents = [p["sha"] for p in c["parents"]]
+    a, cm = c["author"], c["committer"]
+    ts_a = int(datetime.datetime.fromisoformat(a["date"].replace("Z", "+00:00")).timestamp())
+    ts_c = int(datetime.datetime.fromisoformat(cm["date"].replace("Z", "+00:00")).timestamp())
+
+    for off2 in range(-28, 29):  # -14h ~ +14h，步长 30 分钟
+        sign = "+" if off2 >= 0 else "-"
+        n = abs(off2)
+        tz = f"{sign}{n // 2:02d}{(n % 2) * 30:02d}"
+        for trail in (False, True):
+            lines = [f"tree {tree}"] + [f"parent {x}" for x in parents]
+            lines.append(f"author {a['name']} <{a['email']}> {ts_a} {tz}")
+            lines.append(f"committer {cm['name']} <{cm['email']}> {ts_c} {tz}")
+            raw = ("\n".join(lines) + "\n\n" + c["message"] + ("\n" if trail else "")).encode()
+            r = subprocess.run(
+                ["git", "hash-object", "-t", "commit", "--stdin"],
+                cwd=REPO, input=raw, capture_output=True,
+            )
+            if r.stdout.decode().strip() == remote_sha:
+                subprocess.run(
+                    ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+                    cwd=REPO, input=raw, capture_output=True,
+                )
+                subprocess.run(["git", "update-ref", "refs/heads/main", remote_sha], cwd=REPO, check=True)
+                subprocess.run(
+                    ["git", "update-ref", "refs/remotes/origin/main", remote_sha],
+                    cwd=REPO, check=False,
+                )
+                return True
+    return False
+
+
 def main():
     if not REPO.is_dir():
         sys.exit(f"仓库目录不存在: {REPO}")
@@ -439,6 +487,8 @@ def main():
     )
     if fetched.returncode == 0:
         run(["git", "reset", "-q", "--hard", "FETCH_HEAD"], check=False)
+    else:
+        align_local_to_remote(new_sha)
     local_now = run(["git", "rev-parse", "HEAD"], check=False)
     aligned = local_now == new_sha
 
