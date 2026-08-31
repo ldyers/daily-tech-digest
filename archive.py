@@ -60,6 +60,7 @@ def parse_run(path):
       a) 内嵌 ```json 或单行 {"platform","title","url"} 块（08-24/25/27）
       b) markdown 行：> ### 标题 / 🔗 URL / **来源**：平台（08-29）
       c) 代理模式回退：**[平台] 标题** / 🔗 URL / **推荐理由**：…（08-30）
+      d) 脚本模式无方括号变体：**标题** / 来源：平台 / 🔗 URL（08-31）
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -135,10 +136,12 @@ def parse_run(path):
 
     # 脚本模式 b)：markdown 行（> ### 标题 / 🔗 URL / **来源**：平台）
     # 代理模式回退变体（08-30 实测）：**[平台] 标题** / 🔗 URL / **推荐理由**：…
+    # 脚本模式变体（08-31 实测）：**标题**（无平台方括号）/ 来源：平台 / 🔗 URL
     murl = re.search(r"🔗\s*<?(\S+?)>?(?:\s|$)", resp)
     mtitle = re.search(r"^>\s*#{1,6}\s+(.+?)\s*$", resp, re.M)
     atitle = re.search(r"^\*\*\[(.+?)\]\s*(.+?)\*\*\s*$", resp, re.M)
-    if murl and (mtitle or atitle):
+    btitle = re.search(r"^\*\*(?!\[)(.+?)\*\*\s*$", resp, re.M)
+    if murl and (mtitle or atitle or btitle):
         u = murl.group(1)
         md = re.match(r"\[.*?\]\((\S+?)\)", u)
         if md:
@@ -146,7 +149,7 @@ def parse_run(path):
         if not u.startswith("http"):
             return None
         plat = "未知"
-        pm = re.search(r"\*\*来源\*\*[：:]\s*(.+)", resp)
+        pm = re.search(r"(?:\*\*)?来源(?:\*\*)?[：:]\s*(.+)", resp)
         if pm:
             plat = re.sub(r"\s*热榜$", "", pm.group(1).strip()) or "未知"
         reason = None
@@ -155,13 +158,16 @@ def parse_run(path):
             rm = re.search(r"\*\*推荐理由\*\*[：:]?\s*(.+?)(?:\n\n|\n---|\Z)", resp, re.S)
             if rm:
                 reason = rm.group(1).strip()
+        # source 按标题格式判定模式：[平台] 方括号=代理回退，其余=脚本产出
         return {
             **base,
-            "title": (atitle.group(2) if atitle else mtitle.group(1)).strip(),
+            "title": (
+                atitle.group(2) if atitle else (mtitle or btitle).group(1)
+            ).strip(),
             "platform": plat,
             "url": u,
             "reason": reason or SCRIPT_NOTE.format(p=plat),
-            "source": AGENT_SOURCE,
+            "source": AGENT_SOURCE if atitle else SCRIPT_SOURCE,
         }
 
     return None
