@@ -61,6 +61,7 @@ def parse_run(path):
       b) markdown 行：> ### 标题 / 🔗 URL / **来源**：平台（08-29）
       c) 代理模式回退：**[平台] 标题** / 🔗 URL / **推荐理由**：…（08-30）
       d) 脚本模式无方括号变体：**标题** / 来源：平台 / 🔗 URL（08-31）
+      e) 脚本模式全角括号变体：**【平台】** 标题 / 🔗 URL（09-01）
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -141,7 +142,8 @@ def parse_run(path):
     mtitle = re.search(r"^>\s*#{1,6}\s+(.+?)\s*$", resp, re.M)
     atitle = re.search(r"^\*\*\[(.+?)\]\s*(.+?)\*\*\s*$", resp, re.M)
     btitle = re.search(r"^\*\*(?!\[)(.+?)\*\*\s*$", resp, re.M)
-    if murl and (mtitle or atitle or btitle):
+    ctitle = re.search(r"^\*\*【(.+?)】\*\*\s*(.+?)\s*$", resp, re.M)
+    if murl and (mtitle or atitle or btitle or ctitle):
         u = murl.group(1)
         md = re.match(r"\[.*?\]\((\S+?)\)", u)
         if md:
@@ -152,18 +154,25 @@ def parse_run(path):
         pm = re.search(r"(?:\*\*)?来源(?:\*\*)?[：:]\s*(.+)", resp)
         if pm:
             plat = re.sub(r"\s*热榜$", "", pm.group(1).strip()) or "未知"
+        elif ctitle:
+            plat = re.sub(r"\s*热榜$", "", ctitle.group(1).strip()) or plat
         reason = None
         if atitle:
             plat = re.sub(r"\s*热榜$", "", atitle.group(1).strip()) or plat
             rm = re.search(r"\*\*推荐理由\*\*[：:]?\s*(.+?)(?:\n\n|\n---|\Z)", resp, re.S)
             if rm:
                 reason = rm.group(1).strip()
+        # 标题：atitle/ctitle 的标题在第 2 组，其余在第 1 组
+        if atitle:
+            title = atitle.group(2)
+        elif ctitle:
+            title = ctitle.group(2)
+        else:
+            title = (mtitle or btitle).group(1)
         # source 按标题格式判定模式：[平台] 方括号=代理回退，其余=脚本产出
         return {
             **base,
-            "title": (
-                atitle.group(2) if atitle else (mtitle or btitle).group(1)
-            ).strip(),
+            "title": title.strip(),
             "platform": plat,
             "url": u,
             "reason": reason or SCRIPT_NOTE.format(p=plat),
