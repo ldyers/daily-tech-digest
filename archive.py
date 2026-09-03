@@ -62,6 +62,7 @@ def parse_run(path):
       c) 代理模式回退：**[平台] 标题** / 🔗 URL / **推荐理由**：…（08-30）
       d) 脚本模式无方括号变体：**标题** / 来源：平台 / 🔗 URL（08-31）
       e) 脚本模式全角括号变体：**【平台】** 标题 / 🔗 URL（09-01）
+      f) 脚本模式独立行变体：**标题** / 🔗 URL，平台独占一行【平台】（09-03）
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -143,7 +144,8 @@ def parse_run(path):
     atitle = re.search(r"^\*\*\[(.+?)\]\s*(.+?)\*\*\s*$", resp, re.M)
     btitle = re.search(r"^\*\*(?!\[)(.+?)\*\*\s*$", resp, re.M)
     ctitle = re.search(r"^\*\*【(.+?)】\*\*\s*(.+?)\s*$", resp, re.M)
-    if murl and (mtitle or atitle or btitle or ctitle):
+    ftitle = re.search(r"^【(.+?)】\s*$", resp, re.M)
+    if murl and (mtitle or atitle or btitle or ctitle or ftitle):
         u = murl.group(1)
         md = re.match(r"\[.*?\]\((\S+?)\)", u)
         if md:
@@ -156,6 +158,8 @@ def parse_run(path):
             plat = re.sub(r"\s*热榜$", "", pm.group(1).strip()) or "未知"
         elif ctitle:
             plat = re.sub(r"\s*热榜$", "", ctitle.group(1).strip()) or plat
+        elif ftitle:
+            plat = re.sub(r"\s*热榜$", "", ftitle.group(1).strip()) or plat
         reason = None
         if atitle:
             plat = re.sub(r"\s*热榜$", "", atitle.group(1).strip()) or plat
