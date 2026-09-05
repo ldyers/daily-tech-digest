@@ -63,7 +63,6 @@ def parse_run(path):
       d) 脚本模式无方括号变体：**标题** / 来源：平台 / 🔗 URL（08-31）
       e) 脚本模式全角括号变体：**【平台】** 标题 / 🔗 URL（09-01）
       f) 脚本模式独立行变体：**标题** / 🔗 URL，平台独占一行【平台】（09-03）
-      g) 脚本模式管道内联变体：**平台** | [标题](URL)（09-05）
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -182,23 +181,6 @@ def parse_run(path):
             "url": u,
             "reason": reason or SCRIPT_NOTE.format(p=plat),
             "source": AGENT_SOURCE if atitle else SCRIPT_SOURCE,
-        }
-
-    # 脚本模式 g)：单行管道格式（09-05 实测）：**平台** | [标题](URL)
-    # 无 🔗 行，平台与链接同行以 " | " 分隔
-    g = re.search(r"^\*\*(.+?)\*\*\s*\|\s*\[(.+?)\]\((\S+?)\)\s*$", resp, re.M)
-    if g:
-        u = g.group(3)
-        if not u.startswith("http"):
-            return None
-        plat = re.sub(r"\s*热榜$", "", g.group(1).strip()) or "未知"
-        return {
-            **base,
-            "title": g.group(2).strip(),
-            "platform": plat,
-            "url": u,
-            "reason": SCRIPT_NOTE.format(p=plat),
-            "source": SCRIPT_SOURCE,
         }
 
     return None
