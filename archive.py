@@ -64,6 +64,8 @@ def parse_run(path):
       e) 脚本模式全角括号变体：**【平台】** 标题 / 🔗 URL（09-01）
       f) 脚本模式独立行变体：**标题** / 🔗 URL，平台独占一行【平台】（09-03）
       g) 脚本模式管道内联变体：**平台** | [标题](URL)（09-05）
+      h) 加粗标签变体：**平台**：… / **标题**：… / **链接**：…（09-16）
+      i) emoji 标签变体：🏢 **来源**: … / 📰 **标题**: … / 🔗 **链接**: …（09-07）
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -83,19 +85,27 @@ def parse_run(path):
     }
 
     # 旧格式优先（信息最全：含推荐理由与候选池明细）
-    url = re.search(r"链接：(\S+)", resp)
-    title = re.search(r"^\*\*(.+?)\*\*\s*$", resp, re.M)
+    url = re.search(r"(?:\*\*)?链接(?:\*\*)?[：:]\s*<?(\S+?)>?(?=\s|$)", resp)
+    title = re.search(r"^\*\*(.+?)\*\*\s*$", resp, re.M) or re.search(
+        r"(?:\*\*)?标题(?:\*\*)?[：:]\s*(.+)", resp
+    )
     if url and title:
-        plat = re.search(r"平台：(.+)", resp)
-        reason = re.search(r"推荐理由：(.+?)(?:\n\n|\n---|\Z)", resp, re.S)
-        source = re.search(r"数据来源：(.+)", resp)
+        plat = re.search(r"(?:\*\*)?(?:平台|来源)(?:\*\*)?[：:]\s*(.+)", resp)
+        reason = re.search(
+            r"(?:\*\*)?(?:推荐理由|价值解读)(?:\*\*)?[：:]\s*(.+?)(?:\n\n|\n---|\Z)", resp, re.S
+        )
+        source = re.search(r"[（(]?(?:\*\*)?数据来源(?:\*\*)?[：:]\s*(.+?)\s*[）)]?\s*$", resp, re.M)
+        plat_s = re.sub(r"\s*热榜$", "", plat.group(1).strip()) if plat else "未知"
+        # h)/i) 变体是脚本模式产出的转述；仅在响应明示脚本成功时才用固定
+        # 事实性说明兜底，避免把代理模式的空理由误标成脚本产出。
+        scriptlike = bool(re.search(r"脚本执行成功|Script executed successfully|daily_pick_selector", resp))
         return {
             **base,
             "title": title.group(1).strip(),
-            "platform": plat.group(1).strip() if plat else "未知",
+            "platform": plat_s,
             "url": url.group(1).strip(),
-            "reason": reason.group(1).strip() if reason else "",
-            "source": source.group(1).strip() if source else "",
+            "reason": reason.group(1).strip() if reason else (SCRIPT_NOTE.format(p=plat_s) if scriptlike else ""),
+            "source": source.group(1).strip() if source else (SCRIPT_SOURCE if scriptlike else ""),
         }
 
     # 脚本模式 a)：JSON 块（fenced 或单行），要求 title 非空且 url 为 http(s)
