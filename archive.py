@@ -64,6 +64,8 @@ def parse_run(path):
       e) 脚本模式全角括号变体：**【平台】** 标题 / 🔗 URL（09-01）
       f) 脚本模式独立行变体：**标题** / 🔗 URL，平台独占一行【平台】（09-03）
       g) 脚本模式管道内联变体：**平台** | [标题](URL)（09-05）
+      k) 管道格式+独立链接行变体：🔥 **平台** | 标题（纯文本标题，可带 emoji
+       前缀），🔗 URL 独立成行（09-20）。g) 内嵌链接缺失时的兜底。
       h) 加粗标签变体：**平台**：… / **标题**：… / **链接**：…（09-16）
       i) emoji 标签变体：🏢 **来源**: … / 📰 **标题**: … / 🔗 **链接**: …（09-07）
       j) 冒号内嵌加粗变体：**平台：** … / **标题：** … / **链接：** URL，
@@ -213,6 +215,28 @@ def parse_run(path):
         return {
             **base,
             "title": g.group(2).strip(),
+            "platform": plat,
+            "url": u,
+            "reason": SCRIPT_NOTE.format(p=plat),
+            "source": SCRIPT_SOURCE,
+        }
+
+    # 脚本模式 k)：管道格式但链接不内嵌（09-20 实测）：
+    # 🔥 **平台** | 标题（纯文本标题，行首可带 emoji），🔗 URL 独立成行。
+    # 行首 emoji 等前缀用少量非 * 字符吞掉；标题不含 markdown 链接
+    # （含链接的形态已由 g) 命中并提前返回）。
+    k = re.search(r"^[^\n*]{0,4}\*\*(.+?)\*\*\s*\|\s*(.+?)\s*$", resp, re.M)
+    if k and murl:
+        u = murl.group(1)
+        md = re.match(r"\[.*?\]\((\S+?)\)", u)
+        if md:
+            u = md.group(1)
+        if not u.startswith("http"):
+            return None
+        plat = re.sub(r"\s*热榜$", "", k.group(1).strip()) or "未知"
+        return {
+            **base,
+            "title": k.group(2).strip(),
             "platform": plat,
             "url": u,
             "reason": SCRIPT_NOTE.format(p=plat),
