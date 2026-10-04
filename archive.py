@@ -98,8 +98,12 @@ def parse_run(path):
     url = re.search(r"(?:\*\*)?链接(?:\*\*)?[：:](?:\*\*)?\s*<?(\S+?)>?(?=\s|$)", resp)
     # 标题优先取带「标题：」标签的行（j/h 等脚本变体）；整行加粗（旧代理格式）
     # 作兜底，但须排除摘要行（📌 每日热榜精选 - 日期），否则会盖过真实标题。
+    # m) 变体（10-04 实测）：标题行允许 ≤4 个非 * 前缀字符（emoji/空格），
+    # 如「📰 **标题**」；并排除纯日期行与「每日最有价值」头部行。
     title = re.search(r"(?:\*\*)?标题(?:\*\*)?[：:](?:\*\*)?\s*(.+)", resp) or re.search(
-        r"^\*\*(?![^*\n]*每日热榜精选)(.+?)\*\*\s*$", resp, re.M
+        r"^[^\n*]{0,4}\*\*(?![^*\n]*(?:每日热榜精选|每日最有价值))"
+        r"(?!\d{4}-\d{2}-\d{2}\s*\*\*\s*$)(.+?)\*\*\s*$",
+        resp, re.M,
     )
     if url and title:
         plat = re.search(r"(?:\*\*)?(?:平台|来源)(?:\*\*)?[：:](?:\*\*)?\s*(.+)", resp)
@@ -165,7 +169,8 @@ def parse_run(path):
     murl = re.search(r"🔗\s*<?(\S+?)>?(?:\s|$)", resp)
     mtitle = re.search(r"^>\s*#{1,6}\s+(.+?)\s*$", resp, re.M)
     atitle = re.search(r"^\*\*\[(.+?)\]\s*(.+?)\*\*\s*$", resp, re.M)
-    btitle = re.search(r"^\*\*(?!\[)(.+?)\*\*\s*$", resp, re.M)
+    # 排除纯日期独立行（10-03 实测：**2026-10-03** 被误当标题，真实标题在其后）
+    btitle = re.search(r"^\*\*(?!\[)(?!\d{4}-\d{2}-\d{2}\s*\*\*\s*$)(.+?)\*\*\s*$", resp, re.M)
     ctitle = re.search(r"^\*\*【(.+?)】\*\*\s*(.+?)\s*$", resp, re.M)
     ftitle = re.search(r"^【(.+?)】\s*$", resp, re.M)
     if murl and (mtitle or atitle or btitle or ctitle or ftitle):
