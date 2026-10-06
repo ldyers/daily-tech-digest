@@ -101,12 +101,12 @@ def parse_run(path):
     # m) 变体（10-04 实测）：标题行允许 ≤4 个非 * 前缀字符（emoji/空格），
     # 如「📰 **标题**」；并排除纯日期行与「每日最有价值」头部行。
     title = re.search(r"(?:\*\*)?标题(?:\*\*)?[：:](?:\*\*)?\s*(.+)", resp) or re.search(
-        r"^[^\n*]{0,4}\*\*(?![^*\n]*(?:每日热榜精选|每日最有价值))"
+        r"^[^\n*]{0,4}\*\*(?![^*\n]*(?:每日最有价值|热榜精选))"
         r"(?!\d{4}-\d{2}-\d{2}\s*\*\*\s*$)(.+?)\*\*\s*$",
         resp, re.M,
     )
     if url and title:
-        plat = re.search(r"(?:\*\*)?(?:平台|来源)(?:\*\*)?[：:](?:\*\*)?\s*(.+)", resp)
+        plat = re.search(r"(?:\*\*)?(?<!数据)(?:平台|来源)(?:\*\*)?[：:](?:\*\*)?\s*(.+)", resp)
         reason = re.search(
             r"(?:\*\*)?(?:推荐理由|价值解读)(?:\*\*)?[：:](?:\*\*)?\s*(.+?)(?:\n\n|\n---|\Z)", resp, re.S
         )
@@ -170,10 +170,18 @@ def parse_run(path):
     mtitle = re.search(r"^>\s*#{1,6}\s+(.+?)\s*$", resp, re.M)
     atitle = re.search(r"^\*\*\[(.+?)\]\s*(.+?)\*\*\s*$", resp, re.M)
     # 排除纯日期独立行（10-03 实测：**2026-10-03** 被误当标题，真实标题在其后）
-    btitle = re.search(r"^\*\*(?!\[)(?!\d{4}-\d{2}-\d{2}\s*\*\*\s*$)(.+?)\*\*\s*$", resp, re.M)
+    # 再排除摘要行（10-06 实测：**2026年10月6日 · 热榜精选**，真实标题在
+    # 其下方的 markdown 标题行里），整行加粗兜底不得抢在标题行之前命中。
+    btitle = re.search(
+        r"^\*\*(?!\[)(?![^\n]*(?:热榜精选|最有价值))(?!\d{4}-\d{2}-\d{2}\s*\*\*\s*$)(.+?)\*\*\s*$",
+        resp, re.M,
+    )
     ctitle = re.search(r"^\*\*【(.+?)】\*\*\s*(.+?)\s*$", resp, re.M)
     ftitle = re.search(r"^【(.+?)】\s*$", resp, re.M)
-    if murl and (mtitle or atitle or btitle or ctitle or ftitle):
+    # m) 标题行（10-06 实测）：### 🥇 36Kr：标题 —— markdown 标题 + 可选
+    # emoji 前缀 + 「平台：」前缀，真实标题在冒号之后；平台名取第 1 组。
+    htitle = re.search(r"^#{1,6}\s+(?:\S{1,4}[ \t]*)?([^：:\n#]*?)[：:]\s*(.+?)\s*$", resp, re.M)
+    if murl and (mtitle or atitle or btitle or ctitle or ftitle or htitle):
         u = murl.group(1)
         md = re.match(r"\[.*?\]\((\S+?)\)", u)
         if md:
@@ -181,9 +189,16 @@ def parse_run(path):
         if not u.startswith("http"):
             return None
         plat = "未知"
-        pm = re.search(r"(?:\*\*)?来源(?:\*\*)?[：:]\s*(.+)", resp)
+        # 锚定行首（允许 ≤6 字符的 emoji/空白前缀，10-06 实测有 📡/📱 前缀）：
+        # 避免误吞尾部斜体行 *数据来源：…* —— 行首 * 不在前缀字符类内，且
+        # 「来源」前紧邻「数据」二字时用 lookbehind 排除。
+        pm = re.search(
+            r"^[^\n：:*]{0,6}(?<!数据)(?:\*\*)?(?:平台|来源)(?:\*\*)?[：:]\s*(.+)", resp, re.M
+        )
         if pm:
             plat = re.sub(r"\s*热榜$", "", pm.group(1).strip()) or "未知"
+        elif htitle:
+            plat = re.sub(r"\s*热榜$", "", htitle.group(1).strip()) or plat
         elif ctitle:
             plat = re.sub(r"\s*热榜$", "", ctitle.group(1).strip()) or plat
         elif ftitle:
@@ -191,14 +206,19 @@ def parse_run(path):
         reason = None
         if atitle:
             plat = re.sub(r"\s*热榜$", "", atitle.group(1).strip()) or plat
-            rm = re.search(r"\*\*推荐理由\*\*[：:]?\s*(.+?)(?:\n\n|\n---|\Z)", resp, re.S)
-            if rm:
-                reason = rm.group(1).strip()
+        rm = re.search(
+            r"(?:\*\*)?(?:推荐理由|入选理由|价值解读)(?:\*\*)?[：:]\s*(.+?)(?:\n\n|\n---|\Z)",
+            resp, re.S,
+        )
+        if rm:
+            reason = rm.group(1).strip()
         # 标题：atitle/ctitle 的标题在第 2 组，其余在第 1 组
         if atitle:
             title = atitle.group(2)
         elif ctitle:
             title = ctitle.group(2)
+        elif htitle:
+            title = htitle.group(2)
         else:
             title = (mtitle or btitle).group(1)
         # source 按标题格式判定模式：[平台] 方括号=代理回退，其余=脚本产出
