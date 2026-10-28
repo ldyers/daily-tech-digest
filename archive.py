@@ -74,6 +74,12 @@ def parse_run(path):
       另含摘要行 **📌 每日热榜精选 - 日期**（09-18）。冒号在加粗号内部，
       标签正则在冒号后再吞一个可选 **；标题优先取带标签行，整行加粗
       兜底需排除摘要行，否则标题/URL 会被解析成 **。
+      n) 栏目摘要+emoji 方括号变体（10-28）：📊 **每日最有价值 1 条** |
+      日期 摘要行，后跟 🏆 **[平台] 标题** / 🔗 URL / 💡 **一句话点评**。
+      摘要行平台是栏目名、标题是日期，均非真实条目；真实条目在 🏆 行。
+      atitle 放行 ≤4 字符 emoji 前缀后由其命中（该分支先于 k) 的管道
+      匹配，摘要行不会抢先）；k) 另加防呆：平台含「最有价值」或标题
+      为纯日期时视为摘要行、返回 None，绝不把日期当标题归档。
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -168,7 +174,11 @@ def parse_run(path):
     # 脚本模式变体（08-31 实测）：**标题**（无平台方括号）/ 来源：平台 / 🔗 URL
     murl = re.search(r"🔗\s*<?(\S+?)>?(?:\s|$)", resp)
     mtitle = re.search(r"^>\s*#{1,6}\s+(.+?)\s*$", resp, re.M)
-    atitle = re.search(r"^\*\*\[(.+?)\]\s*(.+?)\*\*\s*$", resp, re.M)
+    # n) 行首可带 ≤4 字符 emoji 前缀（10-28 实测 🏆）。前缀存在=脚本模式
+    # 转述，紧贴行首 **[平台]=代理模式回退（08-30），source 据此区分。
+    atitle = re.search(
+        r"^(\*\*|[^\n*]{1,4}\*\*)\[(.+?)]\s*(.+?)\*\*\s*$", resp, re.M
+    )
     # 排除纯日期独立行（10-03 实测：**2026-10-03** 被误当标题，真实标题在其后）
     # 再排除摘要行（10-06 实测：**2026年10月6日 · 热榜精选**，真实标题在
     # 其下方的 markdown 标题行里），整行加粗兜底不得抢在标题行之前命中。
@@ -205,16 +215,16 @@ def parse_run(path):
             plat = re.sub(r"\s*热榜$", "", ftitle.group(1).strip()) or plat
         reason = None
         if atitle:
-            plat = re.sub(r"\s*热榜$", "", atitle.group(1).strip()) or plat
+            plat = re.sub(r"\s*热榜$", "", atitle.group(2).strip()) or plat
         rm = re.search(
-            r"(?:\*\*)?(?:推荐理由|入选理由|价值解读)(?:\*\*)?[：:]\s*(.+?)(?:\n\n|\n---|\Z)",
+            r"(?:\*\*)?(?:推荐理由|入选理由|价值解读|一句话点评)(?:\*\*)?[：:]\s*(.+?)(?:\n\n|\n---|\Z)",
             resp, re.S,
         )
         if rm:
             reason = rm.group(1).strip()
-        # 标题：atitle/ctitle 的标题在第 2 组，其余在第 1 组
+        # 标题：atitle（组 1 为前缀判定）/ctitle 的标题在第 2 组，其余在第 1 组
         if atitle:
-            title = atitle.group(2)
+            title = atitle.group(3)
         elif ctitle:
             title = ctitle.group(2)
         elif htitle:
@@ -228,7 +238,9 @@ def parse_run(path):
             "platform": plat,
             "url": u,
             "reason": reason or SCRIPT_NOTE.format(p=plat),
-            "source": AGENT_SOURCE if atitle else SCRIPT_SOURCE,
+            "source": (
+                AGENT_SOURCE if (atitle and atitle.group(1) == "**") else SCRIPT_SOURCE
+            ),
         }
 
     # 脚本模式 g)：单行管道格式（09-05 实测）：**平台** | [标题](URL)
@@ -253,6 +265,15 @@ def parse_run(path):
     # 行首 emoji 等前缀用少量非 * 字符吞掉；标题不含 markdown 链接
     # （含链接的形态已由 g) 命中并提前返回）。
     k = re.search(r"^[^\n*]{0,4}\*\*(.+?)\*\*\s*[|｜]\s*(.+?)\s*$", resp, re.M)
+    # n) 防呆（10-28 实测）：📊 **每日最有价值 1 条** | 2026-10-28 是栏目
+    # 摘要行 —— 平台为栏目名、标题为纯日期。正常时真实条目已被上方
+    # atitle 命中并提前返回；走到这里说明条目缺失，宁可返回 None 也
+    # 不能把日期当标题归档。
+    if k and (
+        "最有价值" in k.group(1)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", k.group(2).strip())
+    ):
+        k = None
     if k and murl:
         u = murl.group(1)
         md = re.match(r"\[.*?\]\((\S+?)\)", u)
