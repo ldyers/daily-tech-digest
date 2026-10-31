@@ -80,6 +80,9 @@ def parse_run(path):
       atitle 放行 ≤4 字符 emoji 前缀后由其命中（该分支先于 k) 的管道
       匹配，摘要行不会抢先）；k) 另加防呆：平台含「最有价值」或标题
       为纯日期时视为摘要行、返回 None，绝不把日期当标题归档。
+      o) 全角括号无加粗同行变体（10-31 实测）：【平台】标题 / 🔗 URL
+      独立成行。平台与标题同行、全角括号、无加粗；区别于 e)
+      （**【平台】** 标题，ctitle 命中）与 f)（【平台】独占一行，ftitle）。
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -188,10 +191,14 @@ def parse_run(path):
     )
     ctitle = re.search(r"^\*\*【(.+?)】\*\*\s*(.+?)\s*$", resp, re.M)
     ftitle = re.search(r"^【(.+?)】\s*$", resp, re.M)
+    # o)（10-31）：【平台】标题 同行，全角括号无加粗。
+    # 「[ \t]」而非「\s」：禁止跨行 —— 否则会把 f)（【平台】独占一行、
+    # 标题在下一行）误并成同行格式，且标题会带上加粗星号。
+    otitle = re.search(r"^【(.+?)】[ \t]*(.+?)[ \t]*$", resp, re.M)
     # m) 标题行（10-06 实测）：### 🥇 36Kr：标题 —— markdown 标题 + 可选
     # emoji 前缀 + 「平台：」前缀，真实标题在冒号之后；平台名取第 1 组。
     htitle = re.search(r"^#{1,6}\s+(?:\S{1,4}[ \t]*)?([^：:\n#]*?)[：:]\s*(.+?)\s*$", resp, re.M)
-    if murl and (mtitle or atitle or btitle or ctitle or ftitle or htitle):
+    if murl and (mtitle or atitle or btitle or ctitle or ftitle or otitle or htitle):
         u = murl.group(1)
         md = re.match(r"\[.*?\]\((\S+?)\)", u)
         if md:
@@ -213,6 +220,8 @@ def parse_run(path):
             plat = re.sub(r"\s*热榜$", "", ctitle.group(1).strip()) or plat
         elif ftitle:
             plat = re.sub(r"\s*热榜$", "", ftitle.group(1).strip()) or plat
+        elif otitle:
+            plat = re.sub(r"\s*热榜$", "", otitle.group(1).strip()) or plat
         reason = None
         if atitle:
             plat = re.sub(r"\s*热榜$", "", atitle.group(2).strip()) or plat
@@ -227,6 +236,8 @@ def parse_run(path):
             title = atitle.group(3)
         elif ctitle:
             title = ctitle.group(2)
+        elif otitle:
+            title = otitle.group(2)
         elif htitle:
             title = htitle.group(2)
         else:
