@@ -83,6 +83,11 @@ def parse_run(path):
       o) 全角括号无加粗同行变体（10-31 实测）：【平台】标题 / 🔗 URL
       独立成行。平台与标题同行、全角括号、无加粗；区别于 e)
       （**【平台】** 标题，ctitle 命中）与 f)（【平台】独占一行，ftitle）。
+      p) 加粗排名标签变体（11-06 实测）：**📌 平台 · 热榜第 N** 标签行，
+      真实标题在其后的「」引号行内，🔗 URL 独立成行。平台名取自标签行
+      （剥掉 emoji/空白前缀）。标签行本身整行加粗，btitle 兜底会把它
+      误当标题（实测标题被吞成「📌 36Kr · 热榜第 1」、平台为未知），
+      故 ptitle 须先于 btitle 兜底命中。
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -195,6 +200,13 @@ def parse_run(path):
     # 「[ \t]」而非「\s」：禁止跨行 —— 否则会把 f)（【平台】独占一行、
     # 标题在下一行）误并成同行格式，且标题会带上加粗星号。
     otitle = re.search(r"^【(.+?)】[ \t]*(.+?)[ \t]*$", resp, re.M)
+    # p)（11-06 实测）：**📌 平台 · 热榜第 N** 加粗标签行，真实标题在
+    # 其后的「」引号行内，🔗 URL 独立成行。标签行整行加粗，btitle 兜底
+    # 会误吞（11-06 实测标题=「📌 36Kr · 热榜第 1」、平台=未知）；
+    # 平台名取自标签行第 1 组，剥离 emoji/空白前缀。
+    ptitle = re.search(
+        r"^\*\*([^*\n]+?)\s*[·•]\s*热榜第\s*\d+\s*\*\*\s*\n+「([^」]+)」", resp, re.M
+    )
     # m) 标题行（10-06 实测）：### 🥇 36Kr：标题 —— markdown 标题 + 可选
     # emoji 前缀 + 「平台：」前缀，真实标题在冒号之后；平台名取第 1 组。
     htitle = re.search(r"^#{1,6}\s+(?:\S{1,4}[ \t]*)?([^：:\n#]*?)[：:]\s*(.+?)\s*$", resp, re.M)
@@ -222,11 +234,13 @@ def parse_run(path):
             plat = re.sub(r"\s*热榜$", "", ftitle.group(1).strip()) or plat
         elif otitle:
             plat = re.sub(r"\s*热榜$", "", otitle.group(1).strip()) or plat
+        elif ptitle:
+            plat = re.sub(r"^[\W_]+", "", ptitle.group(1)).strip() or plat
         reason = None
         if atitle:
             plat = re.sub(r"\s*热榜$", "", atitle.group(2).strip()) or plat
         rm = re.search(
-            r"(?:\*\*)?(?:推荐理由|入选理由|价值解读|一句话点评)(?:\*\*)?[：:]\s*(.+?)(?:\n\n|\n---|\Z)",
+            r"(?:\*\*)?(?:推荐理由|入选理由|价值解读|一句话点评|今日看点速览)(?:\*\*)?[：:](?:\*\*)?\s*(.+?)(?:\n\n|\n---|\Z)",
             resp, re.S,
         )
         if rm:
@@ -240,6 +254,8 @@ def parse_run(path):
             title = otitle.group(2)
         elif htitle:
             title = htitle.group(2)
+        elif ptitle:
+            title = ptitle.group(2)
         else:
             title = (mtitle or btitle).group(1)
         # source 按标题格式判定模式：[平台] 方括号=代理回退，其余=脚本产出
