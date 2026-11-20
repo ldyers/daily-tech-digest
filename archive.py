@@ -99,6 +99,10 @@ def parse_run(path):
        头部行（含「最有价值」，被排除）。标题加粗不顶格，btitle 放行
        ≤4 字符 emoji 前缀后命中（对齐旧格式分支 m) 形态）；平台行
        「🏷 平台：X」由 pm（行首 ≤6 字符前缀 + 平台：标签）命中。
+      s) 标题内嵌链接变体（11-20 实测）：无「链接：」标签行，URL 以
+       markdown 链接内嵌于标题行「**标题**：[标题](URL)」；推荐理由
+       标签为「为什么值得关注」。标题取链接文本、URL 取链接目标，
+       由主标签分支之后、JSON 回退之前的专用分支命中。
     """
     txt = path.read_text(encoding="utf-8", errors="replace")
     if "## Response" not in txt:
@@ -145,6 +149,30 @@ def parse_run(path):
             "title": title.group(1).strip(),
             "platform": plat_s,
             "url": url.group(1).strip(),
+            "reason": reason.group(1).strip() if reason else (SCRIPT_NOTE.format(p=plat_s) if scriptlike else ""),
+            "source": source.group(1).strip() if source else (SCRIPT_SOURCE if scriptlike else ""),
+        }
+
+    # 脚本模式 s) 变体（11-20 实测）：无「链接：」标签行，URL 以 markdown
+    # 链接内嵌于标题行「**标题**：[标题](URL)」；推荐理由标签为
+    # 「为什么值得关注」。标题取链接文本、URL 取链接目标。
+    mlink = re.search(
+        r"(?:\*\*)?标题(?:\*\*)?[：:](?:\*\*)?\s*\[([^\]]+)\]\((\S+?)\)", resp
+    )
+    if mlink:
+        plat = re.search(r"(?:\*\*)?(?<!数据)(?:平台|来源)(?:\*\*)?[：:](?:\*\*)?\s*(.+)", resp)
+        reason = re.search(
+            r"(?:\*\*)?(?:推荐理由|价值解读|为什么值得关注)(?:\*\*)?[：:](?:\*\*)?\s*(.+?)(?:\n\n|\n---|\Z)",
+            resp, re.S
+        )
+        source = re.search(r"[（(]?(?:\*\*)?数据来源(?:\*\*)?[：:](?:\*\*)?\s*(.+?)\s*[）)]?\s*$", resp, re.M)
+        scriptlike = bool(re.search(r"脚本执行成功|Script executed successfully|daily_pick_selector", resp))
+        plat_s = re.sub(r"\s*热榜$", "", plat.group(1).strip()) if plat else "未知"
+        return {
+            **base,
+            "title": mlink.group(1).strip(),
+            "platform": plat_s,
+            "url": mlink.group(2).strip(),
             "reason": reason.group(1).strip() if reason else (SCRIPT_NOTE.format(p=plat_s) if scriptlike else ""),
             "source": source.group(1).strip() if source else (SCRIPT_SOURCE if scriptlike else ""),
         }
